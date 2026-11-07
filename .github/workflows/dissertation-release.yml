@@ -143,6 +143,41 @@ jobs:
           libreoffice -env:UserInstallation=file:///tmp/lo-shuisky --headless --convert-to pdf --outdir /tmp/shuisky-qa dist/boyar-duma-vasily-shuisky.docx
           test -s /tmp/shuisky-qa/boyar-duma-vasily-shuisky.pdf
           pdfinfo /tmp/shuisky-qa/boyar-duma-vasily-shuisky.pdf | grep '^Pages:'
+      - name: Re-save DOCX for broad Word compatibility and validate final file
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/shuisky-odt /tmp/shuisky-resaved /tmp/shuisky-final-check
+          libreoffice -env:UserInstallation=file:///tmp/lo-shuisky-odt --headless --convert-to odt --outdir /tmp/shuisky-odt dist/boyar-duma-vasily-shuisky.docx
+          test -s /tmp/shuisky-odt/boyar-duma-vasily-shuisky.odt
+          libreoffice -env:UserInstallation=file:///tmp/lo-shuisky-docx --headless --convert-to docx --outdir /tmp/shuisky-resaved /tmp/shuisky-odt/boyar-duma-vasily-shuisky.odt
+          test -s /tmp/shuisky-resaved/boyar-duma-vasily-shuisky.docx
+          cp /tmp/shuisky-resaved/boyar-duma-vasily-shuisky.docx dist/boyar-duma-vasily-shuisky.docx
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+          from lxml import etree
+          from docx import Document
+          p=Path('dist/boyar-duma-vasily-shuisky.docx')
+          with ZipFile(p) as z:
+              assert z.testzip() is None, 'Damaged ZIP archive'
+              names=set(z.namelist())
+              assert {'[Content_Types].xml','word/document.xml','word/_rels/document.xml.rels','_rels/.rels'} <= names, 'Missing required OpenXML parts'
+              for n in names:
+                  if n.endswith('.xml') or n.endswith('.rels'):
+                      etree.fromstring(z.read(n))
+          d=Document(p)
+          para=' '.join(x.text for x in d.paragraphs)
+          for phrase in ('БОЯРСКАЯ ДУМА', 'Тюменцев', 'Заключение', 'Введение'):
+              assert phrase.casefold() in para.casefold(), 'Missing expected content: '+phrase
+          assert len(d.paragraphs)>150, 'Unexpectedly short document'
+          assert len(d.inline_shapes)>=2, 'Research charts missing'
+          print('Validated resaved DOCX',p.stat().st_size,'bytes,',len(d.paragraphs),'paragraphs,',len(d.inline_shapes),'figures')
+          PY
+          libreoffice -env:UserInstallation=file:///tmp/lo-shuisky-final --headless --convert-to pdf --outdir /tmp/shuisky-final-check dist/boyar-duma-vasily-shuisky.docx
+          test -s /tmp/shuisky-final-check/boyar-duma-vasily-shuisky.pdf
+          pdfinfo /tmp/shuisky-final-check/boyar-duma-vasily-shuisky.pdf | grep '^Pages:'
+          sha256sum dist/boyar-duma-vasily-shuisky.docx
       - name: Publish stable release, replacing old DOCX
         env:
           GH_TOKEN: ${{ github.token }}
@@ -151,4 +186,9 @@ jobs:
             gh release create dissertation-latest --target "$GITHUB_SHA" --title "Боярская дума Василия Шуйского — актуальная версия" --notes "Объединённая исследовательская рукопись DOCX, оформленная по ГОСТ Р 7.0.11–2011. Научная редакция не завершена."
           fi
           gh release upload dissertation-latest dist/boyar-duma-vasily-shuisky.docx --clobber
+          mkdir -p /tmp/shuisky-release-verify
+          gh release download dissertation-latest --pattern boyar-duma-vasily-shuisky.docx --dir /tmp/shuisky-release-verify --clobber
+          cmp dist/boyar-duma-vasily-shuisky.docx /tmp/shuisky-release-verify/boyar-duma-vasily-shuisky.docx
+          echo "Release asset checksum verified:"
+          sha256sum /tmp/shuisky-release-verify/boyar-duma-vasily-shuisky.docx
           gh release view dissertation-latest --json url,assets --jq '{url,assets:[.assets[].name]}'
