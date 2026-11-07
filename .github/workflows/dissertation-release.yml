@@ -1,0 +1,154 @@
+name: Build and publish unified dissertation DOCX
+on:
+  push:
+    branches: [main]
+    paths:
+      - "manuscript/**"
+      - "sources/**"
+      - "research/**"
+      - "docs/**"
+      - "presentation/**"
+      - "data/**"
+      - ".github/workflows/dissertation-release.yml"
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq pandoc libreoffice-writer poppler-utils
+          python -m pip install --quiet python-docx matplotlib
+      - name: Assemble manuscript, bibliography, tables and illustrations
+        run: |
+          python - <<'PY'
+          import csv,re,subprocess
+          from pathlib import Path
+          from collections import defaultdict
+          import matplotlib
+          matplotlib.use('Agg')
+          import matplotlib.pyplot as plt
+          from docx import Document
+          from docx.shared import Mm,Pt
+          from docx.enum.text import WD_ALIGN_PARAGRAPH
+          from docx.oxml import OxmlElement
+          from docx.oxml.ns import qn
+          out=Path('dist');out.mkdir(exist_ok=True)
+          files=[
+           ('Введение','manuscript/00-introduction.md'),
+           ('Глава 1. Историография и источники','manuscript/01-historiography-and-sources.md'),
+           ('Глава 2. Боярская дума и политическая элита','manuscript/02-boyar-duma-structure.md'),
+           ('Глава 3. И. О. Тюменцев и историографические дискуссии','manuscript/02a-tyumentsev-and-debate.md'),
+           ('Глава 4. Дума и царская власть, 1606–1608','manuscript/03-duma-and-tsar-1606-1608.md'),
+           ('Глава 5. Политический кризис, 1608–1610','manuscript/04-crisis-1608-1610.md'),
+           ('Заключение','manuscript/05-conclusion.md'),
+           ('Список источников и литературы','sources/verified-bibliography.md'),
+           ('Приложение А. Анализ реконструкций Тюменцева','research/tyumentsev-2008-duma-analysis.md'),
+           ('Приложение Б. Источниковедческая критика списка сторонников','research/source-criticism-supporters-list.md'),
+           ('Приложение В. Специальная библиография','sources/tyumentsev-and-related-scholarship.md'),
+           ('Приложение Г. Матрица проверки','sources/verification-matrix.md'),
+           ('Приложение Д. Наглядные схемы','presentation/research-figures.md'),
+           ('Приложение Е. Материалы презентации','presentation/evidence-first-defense.md'),
+           ('Приложение Ж. План презентации','presentation/defense-outline.md'),
+           ('Приложение З. Научные исправления','docs/revision-audit-2026-11-08.md'),
+           ('Приложение И. Аудит оформления','docs/compliance-and-length-audit.md'),
+           ('Приложение К. Структура рукописи','docs/outline.md'),
+           ('Приложение Л. Техническое задание','docs/technical-brief.md')]
+          md=['**НА ПРАВАХ РУКОПИСИ**\n\n',
+              '**БОЯРСКАЯ ДУМА В ПЕРИОД ПРАВЛЕНИЯ ВАСИЛИЯ IV ШУЙСКОГО (1606–1610)**\n\n',
+              '**Сводный научный исследовательский макет докторской диссертации**\n\n',
+              'Сведения об авторе, организации, специальности и научном консультанте не предоставлены.\n\n',
+              '2026\n\n',
+              '**Статус:** предварительная рукопись; не завершённая докторская диссертация. Научная новизна, результаты самостоятельной архивной реконструкции и апробация не заявляются без доказательств.\n\n',
+              '\\newpage\n\n']
+          for title,path in files:
+            s=Path(path).read_text(encoding='utf-8')
+            s=re.sub(r'^# [^\n]+\n','',s,count=1,flags=re.M)
+            s=re.sub(chr(96)*3+r'mermaid[\s\S]*?'+chr(96)*3,
+                     '*Схема в исходном формате Mermaid находится в репозитории; её источниковедческие ограничения приведены рядом.*',s)
+            md.append('\\newpage\n\n# '+title+'\n\n'+s+'\n\n')
+          for letter,title,path in [
+              ('М','Реестр опубликованных реконструкций','data/tyumentsev-published-reconstructions.csv'),
+              ('Н','Упоминания персоналий в источнике','data/supporters-source-mentions.csv')]:
+            md.append('\\newpage\n\n# Приложение '+letter+'. '+title+'\n\n')
+            with open(path,encoding='utf-8-sig',newline='') as f:rows=list(csv.DictReader(f,delimiter=';'))
+            for i,row in enumerate(rows,1):
+              md.append('**Запись '+str(i)+'.** '+'; '.join(k.replace('_',' ')+': '+(v or 'не установлено') for k,v in row.items())+'.\n\n')
+          with open('data/tyumentsev-published-reconstructions.csv',encoding='utf-8-sig',newline='') as f:
+            rows=list(csv.DictReader(f,delimiter=';'))
+          groups=defaultdict(list)
+          for row in rows:groups[row['polity']].append((row['category'],int(row['count'])))
+          md.append('\\newpage\n\n# Приложение О. Диаграммы по опубликованным реконструкциям\n\n')
+          for i,(title,items) in enumerate(groups.items(),1):
+            plt.rcParams.update({'font.family':'DejaVu Sans'})
+            fig,ax=plt.subplots(figsize=(8,4))
+            bars=ax.barh([a for a,b in items],[b for a,b in items])
+            ax.invert_yaxis();ax.bar_label(bars)
+            ax.set_xlim(0,max(v for a,v in items)*1.2)
+            ax.set_title(title);fig.tight_layout()
+            fig.savefig(out/f'chart{i}.png',dpi=140);plt.close(fig)
+            md.append('## '+title+'\n\n![](chart'+str(i)+'.png){ width=15cm }\n\n')
+            md.append('*И. О. Тюменцев, 2008: данные не равнозначны составу одного заседания; сравнение политических центров требует учёта методики и хронологии.*\n\n')
+          (out/'combined.md').write_text(''.join(md),encoding='utf-8')
+          ref=Document()
+          sec=ref.sections[0]
+          sec.page_width=Mm(210);sec.page_height=Mm(297)
+          sec.left_margin=Mm(25);sec.right_margin=Mm(10)
+          sec.top_margin=Mm(20);sec.bottom_margin=Mm(20)
+          norm=ref.styles['Normal'];norm.font.name='Times New Roman';norm.font.size=Pt(14)
+          norm.paragraph_format.line_spacing=1.5
+          norm.paragraph_format.first_line_indent=Mm(12.5)
+          norm.paragraph_format.alignment=WD_ALIGN_PARAGRAPH.JUSTIFY
+          norm.paragraph_format.space_after=Pt(0)
+          for i in (1,2,3):
+            st=ref.styles[f'Heading {i}']
+            st.font.name='Times New Roman';st.font.bold=True
+            st.font.size=Pt(16 if i==1 else 14)
+            st.paragraph_format.keep_with_next=True
+          ref.save(out/'reference.docx')
+          target=out/'boyar-duma-vasily-shuisky.docx'
+          subprocess.run(['pandoc',str(out/'combined.md'),'-f','markdown+raw_tex+pipe_tables+fenced_code_blocks',
+                         '--toc','--toc-depth=2','--reference-doc',str(out/'reference.docx'),
+                         '--resource-path',str(out),'-o',str(target)],check=True)
+          d=Document(target)
+          for sec in d.sections:
+            sec.page_width=Mm(210);sec.page_height=Mm(297)
+            sec.left_margin=Mm(25);sec.right_margin=Mm(10)
+            sec.top_margin=Mm(20);sec.bottom_margin=Mm(20)
+            sec.different_first_page_header_footer=True
+            p=sec.footer.paragraphs[0];p.alignment=WD_ALIGN_PARAGRAPH.CENTER
+            r=p.add_run()
+            a=OxmlElement('w:fldChar');a.set(qn('w:fldCharType'),'begin')
+            b=OxmlElement('w:instrText');b.set(qn('xml:space'),'preserve');b.text=' PAGE '
+            c=OxmlElement('w:fldChar');c.set(qn('w:fldCharType'),'end')
+            r._r.extend((a,b,c))
+          upd=OxmlElement('w:updateFields');upd.set(qn('w:val'),'true')
+          d.settings.element.append(upd)
+          d.core_properties.title='Боярская дума Василия IV Шуйского (1606–1610)'
+          d.save(target)
+          assert target.stat().st_size>20000
+          print('DOCX created:',target,target.stat().st_size,'bytes')
+          PY
+      - name: Validate Word file by rendering it
+        run: |
+          mkdir -p /tmp/shuisky-qa
+          libreoffice -env:UserInstallation=file:///tmp/lo-shuisky --headless --convert-to pdf --outdir /tmp/shuisky-qa dist/boyar-duma-vasily-shuisky.docx
+          test -s /tmp/shuisky-qa/boyar-duma-vasily-shuisky.pdf
+          pdfinfo /tmp/shuisky-qa/boyar-duma-vasily-shuisky.pdf | grep '^Pages:'
+      - name: Publish stable release, replacing old DOCX
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view dissertation-latest >/dev/null 2>&1; then
+            gh release create dissertation-latest --target "$GITHUB_SHA" --title "Боярская дума Василия Шуйского — актуальная версия" --notes "Объединённая исследовательская рукопись DOCX, оформленная по ГОСТ Р 7.0.11–2011. Научная редакция не завершена."
+          fi
+          gh release upload dissertation-latest dist/boyar-duma-vasily-shuisky.docx --clobber
+          gh release view dissertation-latest --json url,assets --jq '{url,assets:[.assets[].name]}'
